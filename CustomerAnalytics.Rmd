@@ -1,0 +1,477 @@
+---
+title: "Caso practico Transactions"
+author: "David de la Torre"
+date: "18/2/2021"
+output:
+  pdf_document: default
+  html_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r imports, include=FALSE}
+if(!require(tidyverse)) install.packages('tidyverse') #Comprobamos si tenemos el paquete instalado, sino lo instalamos
+library(tidyverse) #Importamos el paquete
+
+if(!require(scales)) install.packages('scales')
+library(scales)
+
+if(!require(fpc)) install.packages('fpc')
+library(fpc)
+```
+
+```{r temas_graficos, include=FALSE}
+config.estilos <- list(
+  theme_classic(), 
+  scale_color_brewer(palette = 'Paired'),
+  scale_fill_brewer(palette = 'Paired')
+)
+```
+
+
+# Objetivo
+
+El objetivo del proyecto es analizar datos transaccionales de un e-commerce y segmentar los clientes.
+
+El trabajo se va a dividir en cinco partes:
+
+1. Importación de datos, análisis de calidad de los datos y análisis descriptivo.
+2. Preparación de los datos.
+3. Segmentación de clientes con la recencia y la frecuencia.
+4. Segmentación de clientes con el gasto total y frecuencia de compra.
+5. Dendograma de tipología de productos por el gasto de cada cliente.
+
+Opcionalmente, se va a aplicar un método de segmentación analítica no supervisado mediante un modelo kmeans. Adicionalmente se va a lleavar a cabo un Análisis de Componentes Principales, PCA.
+
+## 1. Importación de datos, calidad de datos y análisis descriptivo
+
+El primer paso es cargar los datos transaccionales con los que vamos a trabajar.
+
+```{r data_load}
+file <- './Transactions Caso Practico.csv'
+
+df_RAW <- read.table(file, header = TRUE, sep = ';')
+
+```
+
+Una vez contamos con los datos hacemos extraemos una breve información del estado de cada columna.
+
+```{r cars}
+summary(df_RAW)
+```
+
+Contamos con un dataset de 4805 registros. 7 variables cuatro de ellas cuantitativas y tres cualitativas.
+
+A priori la calidad de los datos parece ser bastante buena, podemos ver que en ninguna de las columnas contamos con valores nulos. También observamos no existen datos anómalos que resalten en las columnas.
+
+### Vamos a generar algunas visualizaciones para entender mejor los datos
+
+Vamos a graficar la variable *Quantity*, queremos saber las cantidades que suelen solicitar de nuestros productos los clientes.
+
+```{r quantity_bar}
+quantity_bar <- df_RAW %>%
+  select(Quantity) %>%
+  ggplot(aes(x = as.character(Quantity), fill = as.character(Quantity))) +
+  geom_bar() +
+  labs(
+    title = 'Distribución cantidades en las lineas de pedidos',
+    x = 'Quantity',
+    y = 'Number'
+  ) +
+  config.estilos +
+  theme(
+    legend.position = 'none'
+  )
+
+quantity_bar
+```
+
+Vamos a estudiar como se distribuyen los precios de los productos que se adquieren en la tienda.
+
+```{r price_hist}
+price_hist <- df_RAW %>%
+  select(Price) %>%
+  ggplot(aes(x= Price)) +
+  geom_histogram(binwidth = 3, fill = 'steelblue') +
+  scale_x_continuous(breaks=seq(0, 50,5)) +
+  labs(
+    title = 'Distribución de los precios de los productos que se compran',
+    y = 'Frequency'
+  ) +
+  config.estilos
+
+price_hist
+```
+
+Vamos a estudiar cuantos clientes y cuantas clientas tenemos.
+
+```{r gender_bar}
+gender_bar <- df_RAW %>%
+  select(gender) %>%
+  ggplot(aes(x= gender, fill = gender)) +
+  geom_bar() +
+  labs(
+    title = 'Distribución del género de los clientes',
+    x = 'Gender',
+    y = 'Number'
+  ) +
+  config.estilos +
+  theme(
+    legend.position = 'none'
+  )
+
+gender_bar
+
+```
+
+Vamos a estudiar el producto más vendido en la tienda.
+
+```{r product_bar, warning=FALSE, message = FALSE}
+product_bar <- df_RAW %>%
+  select(product) %>%
+  group_by(product) %>%
+  summarise(
+    count = n()
+  ) %>%
+  ggplot(aes(x= reorder(product, -count), y = count,  fill = product)) +
+  geom_bar(stat = 'identity') +
+  labs(
+    title = 'Distibución de compras por poducto',
+    x = 'Product',
+    y = 'Number'
+  ) +
+  config.estilos +
+  theme(
+    legend.position = 'none'
+  )
+
+product_bar
+  
+```
+Por último vamos a estudiar cuales son los productos más vendidos en funcion del género.
+
+```{r}
+productos_genero_bar <- df_RAW %>%
+  select(product, gender) %>%
+  ggplot(aes(x=product, fill = gender)) +
+  geom_bar() +
+  labs(
+    title = 'Productos comprados por género',
+    x = 'Product',
+    y = 'Number'
+  ) +
+  config.estilos
+
+productos_genero_bar
+```
+
+
+
+## 2. Preparación de los datos
+
+En este bloque vamos a realizar todas las transformaciones de datos necesarias para posteriormente trabajar con ellos. Tenemos que acomodar los datos a las necesaidades que vamos a tener.
+
+Lo primero va a ser transformar las fechas a formato Date, actualmente se encuentran como strings.
+
+```{r}
+df_RAW <- df_RAW %>%
+  mutate(
+    orderdate = as.Date(orderdate, '%d/%m/%Y')
+  )
+```
+
+Continuamos preparándo los campos que vamos a necesitar para calcular las variables que conforman el RFM.
+
+```{r preparacion_rfm}
+df <- df_RAW %>%
+  group_by(clientId) %>%
+  summarise(
+    firstOrderDate = min(orderdate),
+    lastOrderDate = max(orderdate), 
+    n_Orders = n_distinct(orderId),
+    n_Products = n_distinct(product),
+    totalSpent = sum(Quantity*Price)
+  )
+
+date <- max(df$lastOrderDate) #Nos situamos en la fecha en la que vamos a realizar el análisis
+```
+
+El siguiente paso es calcular la RFM. Para ello deberemos calcular la Recencia, la Frecuencia y el Gasto. 
+
+```{r calculo_rfm}
+df <- df %>%
+  mutate(
+    Recency_days = as.numeric(date - lastOrderDate), #Recencia en días
+    Recency_weeks = round(difftime(date, #Recencia en semanas
+                lastOrderDate, units = c("weeks")), 0),
+    Frequency = n_Orders,
+    Monetary = totalSpent
+  )
+
+df
+
+```
+
+A continuación ejecutamos un paso para discretizar los valores de Recencia,  Frecuencia y Gasto que nos permitirán graficarlos y clasificar los clientes más facilmente.
+
+```{r cat_variables}
+df$Recency_weeks_cat <- ordered(ifelse(
+  df$Recency_weeks <= 3,
+  '0 - 3 semanas',
+  ifelse(
+    df$Recency_weeks >= 4 & df$Recency_weeks <= 7,
+    '4 - 7 semanas',
+     ifelse(
+       df$Recency_weeks >= 8 & df$Recency_weeks <= 11,
+       '8 - 11 semanas',
+       '> 12 semanas'
+    )
+  )
+),
+levels = c('0 - 3 semanas', '4 - 7 semanas', '8 - 11 semanas', '> 12 semanas'))
+
+df$Frequency_cat <- ordered(ifelse(
+  df$Frequency == 1|df$Frequency == 2,
+  '1 or 2 time',
+  ifelse(
+    df$Frequency == 3 | df$Frequency == 4,
+    '3 or 4 times',
+     ifelse(
+       df$Frequency == 5 | df$Frequency == 6,
+       '5 or 6 times',
+       '+ 6 times'
+    )
+  )
+),
+levels = c('1 or 2 time', '3 or 4 times', '5 or 6 times', '+ 6 times'))
+
+df$Monetary_cat <- ordered(ifelse(
+  df$Monetary <= 50,
+  '0-50',
+  ifelse(
+    df$Monetary >= 51 & df$Monetary <= 100,
+    '51-100',
+     ifelse(
+       df$Monetary >= 101 & df$Monetary <= 200,
+       '101-200',
+       ifelse(
+         df$Monetary >= 201 & df$Monetary <= 400,
+         '201-400',
+         '> 401'
+      )
+    )
+  )
+),
+levels = c('0-50', '51-100', '101-200', '201-400','> 401'))
+```
+
+Una vez contamos con los datos procesados podemos proceder a generar análisis que nos permitirán encontrar patrones e información que se encuentra en estos.
+
+## 3. Segmentación de clientes con la recencia y la frecuencia
+
+Esta técnica de segmentación se engloba dentro de la segmentación clásica. Hemos tenido que definir los grupos manualmente mediante el conocimineto de expertos, este conocimineto suele adquirirse mediante experiencia o analizando manualmente cubos de datos.
+
+```{r, warning= FALSE, message = FALSE}
+df_recencia_frecuencia <- df %>%
+  select(Recency_weeks_cat, Frequency_cat) %>%
+  group_by(
+    Recency_weeks_cat,
+    Frequency_cat
+  ) %>%
+  summarise(
+    count = n()
+  )
+
+ggplot(df_recencia_frecuencia, aes(x=Recency_weeks_cat, y = Frequency_cat, fill = count)) +
+  geom_tile() +
+  labs(
+    title = 'Segmentación Recencia x Frecuencia',
+    x = 'Recencia', 
+    y = 'Frecuencia'
+  ) +
+  theme(
+    legend.position = 'none'
+  )
+```
+Este mapa de calor muestra los grupos de clientes en función de su conducta de frecuencia de compras y su recencia. El gran inconveniente de esta técnica es que hemos tenido que definir manualmente los grupos.
+
+## 4. Segmentación de clientes con el gasto total y frecuencia de compra
+
+Esta técnica de segmentación se engloba dentro de la segmentación clásica. Hemos tenido que definir los grupos manualmente mediante el conocimineto de expertos, este conocimineto suele adquirirse mediante experiencia o analizando manualmente cubos de datos.
+
+```{r, warning= FALSE, message = FALSE}
+df_monetary_frecuencia <- df %>%
+  select(Monetary_cat, Frequency_cat) %>%
+  group_by(
+    Monetary_cat,
+    Frequency_cat
+  ) %>%
+  summarise(
+    count = n()
+  )
+
+ggplot(df_monetary_frecuencia, aes(x=Monetary_cat, y = Frequency_cat, fill = count)) +
+  geom_tile() +
+  labs(
+    title = 'Segmentación Gasto total x Frecuencia',
+    x = 'Gasto total', 
+    y = 'Frecuencia'
+  ) +
+  theme(
+    legend.position = 'none'
+  )
+```
+Este mapa de calor muestra los grupos de clientes en función de su conducta de frecuencia de compras y los gastos que han realizado en sus compras. El gran inconveniente de esta técnica es que hemos tenido que definir manualmente los grupos.
+
+## (Opcional) Segmentación mediante modelado analítico no supervisado y PCA
+
+Como primer paso vamos a crear un dataframe con las variables numéricas sobre las que vamos a aplicar el análisis de componentes principales. 
+
+```{r}
+df_pca <- df %>%
+  select(clientId, Recency_days, Frequency, Monetary)
+
+df_pca <- remove_rownames(df_pca) %>% #Transformamos el campo clientId en indice del dataframe
+  column_to_rownames(var = "clientId")
+
+```
+
+Con la funcion *prcomp()* realizamos el PCA de las variables. Pero antes normalizamos las 3 variables, si no lo hiciésemos la variabilidad en las unidades de los atributos tendría un gran efecto en el resultado.
+
+```{r pca}
+vars.to.use <- colnames(df_pca)[-1]
+
+df_pca_norm <- scale(df_pca)
+
+pca <- prcomp(df_pca_norm) #Parametros center y scale para normalizar las variables.
+
+pca
+```
+
+Un primer paso, muy recomendable, es hacer un summary de la respuesta del la función *prcomp()*. Nos permitirá ver que proporción de la varianza podemos explicar con *PC1*,  *PC2* y *PC3*.
+
+```{r}
+summary(pca)
+```
+
+Vamos a replresentar gráficamente la varianzas de cada una de las variables.
+
+```{r graf_codo}
+plot(pca, type = 'l')
+```
+
+Para decidir el número de componentes que utilizar no existe un aregla escrita, los estadistas suelen fijarse en lo que se conoce como "la regla del codo" que dice que en algun punto del gráfico la linea que hemos representado tenderá a hacer un codo lo suficientemente grande para tenerlo en cuenta. De esta manera cojeremos las variables hasta ese codo. En este caso nos quedaríamos con la primera y segunda componente principal y rechazaríamos la tercera.
+
+Ahora, con los resultados que nos ha devuelto la función *prcomp()*, debemos aplicar una transformación lineal a cada una de las columnas de nuestro dataframe con la matriz de rotación.
+
+```{r pca_transform_lineal}
+df_pca_norm <- data.frame(df_pca_norm) %>%
+  mutate(
+    PC1 = apply(pca$rotation[,1]*df_pca_norm, 1, sum),
+    PC2 = apply(pca$rotation[,2]*df_pca_norm, 1, sum)
+  )
+
+head(df_pca_norm) #Estructura que tiene el dataframe
+```
+Graficamos las variables *PC1* y *PC2*.
+
+```{r}
+ggplot(df_pca_norm, aes(x = PC1, y = PC2))+
+  geom_point() +
+  config.estilos
+```
+
+Sobre el gráfico de dispersión de las componentes *PC1* y *PC2* vamos a aplicar un algoritmo de aprendizaje automático no supervisado llamado kmeans. Que nos va a identificar dentro de los datos tantos grupos como le indiquemos. Los grupos los crea en funcion de la similitud entre los individuos de un universo, en este caso nuestro dataset compuesto por *PC1* y *PC2*. 
+
+```{r}
+centroides <- 3
+df_clusters <- kmeans(df_pca_norm[,c('PC1','PC2')], centroides,nstart=100, iter.max=100) #Le pasamos por parámetro la misma matriz normalizada que hemos usado para PCA.
+
+groups <- as.character(df_clusters$cluster)
+
+ggplot() +
+  geom_point(data = df_pca_norm, 
+             mapping = aes(x = PC1, 
+                                  y = PC2, 
+                                  colour = groups)) +
+  config.estilos
+
+```
+
+Vemos que sobre el gráfico anterior ahora podemos distinguir grupos que podemos analizar y dar un sentido.
+
+¿Pero como sabemos que hay 3 y no 10 grupos en nuestros datos? Para ello debemos ejecutar el algoritmo kmeans iterativamente y ver cual nos devuelve mejores resultados. 
+
+Para automatizar la ejecución del algoritmo de forma repetida podemos utilizar la función *kmeansruns()* que nos realizará las pruebas de forma autónoma y nos devolverá todos los resultados de cada una de las iteraciones con los distintos valores de *K*. Adicionalmente vamos a realizar una representación de los resultados que devuelve cada valor de *K* y con ello elegiremos el mejor número de clusters para nuestros datos.
+
+```{r}
+
+clusters_ks <- kmeansruns(df_pca_norm[,c('PC1','PC2')], krange = 2:10, criterion = 'asw')
+
+df_clusters_ks <- as.data.frame(scale(clusters_ks$crit))
+
+ggplot(df_clusters_ks, aes(x = 1:10, y=V1)) +
+  geom_point() +
+  geom_line() +
+  labs(
+    title = 'Resultados para diferentes valores de K',
+    x = 'k',
+    y = 'Resultado'
+  ) +
+  scale_x_continuous(breaks = 1:10, labels = 1:10) +
+  config.estilos
+```
+
+Volviendo a aplicar "la regla del codo" podemos tomar la decisión del valor de *k* que maximiza el resultado del indicador. En este caso vemos que 3 clusters explican muy bien nuestros datos, aun que el valor óptimo es de 6 clusters. Este va a ser el valor de *k* que vamos a elegir.
+
+```{r}
+centroides <- clusters_ks$bestk
+df_clusters <- kmeans(df_pca_norm[,c('PC1','PC2')], centroides,nstart=100, iter.max=100) #Le pasamos por parámetro la misma matriz normalizada que hemos usado para PCA.
+
+groups <- as.character(df_clusters$cluster)
+
+ggplot() +
+  geom_point(data = df_pca_norm, 
+             mapping = aes(x = PC1, 
+                                  y = PC2, 
+                                  colour = groups)) +
+  config.estilos
+
+```
+Todo este proceso nos ha permitido, de fomra automatizada y objetiva, la segmentación de los clientes. Mediante estas segmentaciones podremos tomar acciones para llevar a los clientes a un perfil que nos interesa más, retenerlos en cierto perfil o adelantarnos a posibles fugas.
+
+## 5. Dendograma tipología de productos por gasto de cliente.
+
+```{r}
+head(df_RAW)
+```
+Como queremos ver los productos por el gato total, lo primero que debemos hacer es calcular el casto todal para cada producto que nos han comprado.
+
+```{r message = FALSE}
+MatrizGastos <- df_RAW %>%
+  group_by(product) %>%
+  summarise(
+    Total = sum(Quantity * Price)
+  )
+
+MatrizGastos
+```
+
+A continuación calculamos las distancias entre los gastos de los productos, distancias pequeñas representan que nuestros productos son similares y viceversa. El resultado de la función *dist()* es una matriz de distancias entre productos.
+
+```{r}
+dist <- dist(MatrizGastos$Total, method='euclidean')
+
+dist
+```
+
+Calculamos el dendograma y lo visualizamos.
+
+```{r}
+pfit <- hclust(dist, method = 'ward.D')
+
+plot(pfit, labels = MatrizGastos$product, xlab = 'Producto')
+```
+Podemos decir que hay cuatro grupos de productos en función del gasto total que se realiza en ellos. Por una parte los productos *i, b, d* que serían los más similares entre si. Luego tendríamos los productos *e y h* y *a y f* que tienen una similitud muy parecida entre ellos y por último los productos *c y g*. Si seguimos subiendo en el dendograma podemos ir encontrando cuales de los grupos mencionados se parecen más unos a otros. 
